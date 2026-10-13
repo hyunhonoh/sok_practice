@@ -1,169 +1,191 @@
-# 04. Splunk Operator 배포 (최종 목표)
+# 04. Splunk Operator 배포 (실측 완료)
 
-nginx 배포([03](03-deploy-nginx.md))가 끝난 뒤의 최종 단계.
-**Operator 배포는 실측 완료(2026-10-14, 맥).** Standalone(Splunk 인스턴스) 생성은 아직이다.
-
-## 흐름에서의 위치
+[03](03-deploy-nginx.md)까지 끝난 상태(컨트롤플레인 + 가짜 EC2 워커 2대)에서 Operator와
+Splunk Standalone 1대를 **워커에만** 올린다. 2.8.1과 3.2.0 두 버전을 모두 실측했다(2026-10-14, 맥).
 
 ```
-00 환경 → 01 EKS 컨트롤플레인 → 02 가짜 EC2 조인 → 03 nginx → 04 Operator  ← 여기
+00 환경 → 01 EKS 컨트롤플레인 → 02 가짜 EC2 조인 → 03 nginx → 04 Operator + Splunk  ← 여기
 ```
 
-nginx와 같은 경로(워커 노드에 배치)로 Operator를 올리는 것이 최종 목표다.
+## 버전별 차이 (요약)
 
-## 결과 (실측)
+| | **2.8.1** | **3.2.0** (2026-09 최신) |
+|---|---|---|
+| 기본 Splunk 이미지 | `splunk/splunk:9.4.3` | `splunk/splunk:10.4.0` |
+| Operator 이미지 | amd64 단일 → 맥에선 Rosetta | **amd64 + arm64** → 맥에서도 네이티브 |
+| 사이드카 | kube-rbac-proxy (2/2) | 없음 (1/1) |
+| 매니페스트 패치 | **필요** — gcr.io 한 줄 | 불필요 |
+| `SPLUNK_GENERAL_TERMS` | 항목 없음, **필요 없음** | **필수** — 기본값이 비어 있다 |
+| 맥 결과 | ✅ Ready (이미지 load 후 111초) | ✅ Ready (동의 설정 후 152초) |
+| Splunk 메모리 (안정 후) | 약 1.2GB | 약 2.1GB |
+
+3.0.0도 같은 구조다(`splunk/splunk:10.0.0`, `SPLUNK_GENERAL_TERMS` 비어 있음 — 매니페스트로 확인, 실행은 안 함).
+
+## 맥에서만 — Splunk 이미지 load (먼저 할 것)
+
+`splunk/splunk`는 **amd64판만 있다.** arm64 가짜 EC2에서 그냥 띄우면:
 
 ```
-NAME                                                READY   STATUS    RESTARTS   NODE
-splunk-operator-controller-manager-d57b6d5bd-nzznm  2/2     Running   0          fake-ec2-2
-
-PVC splunk-operator-app-download   Bound   10Gi   local-path
-CRD 8개 등록, 리더 리스 획득, 컨트롤러 9개 "Starting workers" (standalone 포함)
+Failed to pull image "splunk/splunk:9.4.3": ... no match for platform in manifest: not found
 ```
 
-가짜 EC2는 arm64인데 Operator 이미지는 amd64 전용이다. 노드 안에서 실제 프로세스를 보면:
+- `splunk/splunk`는 "아키텍처 목록" 형식인데 목록에 `linux/amd64` 하나뿐이다.
+  arm64 노드의 kubelet(containerd)은 목록에서 자기 아키텍처를 못 찾으면 받지 않는다.
+- `ctr images pull --platform linux/amd64`로 미리 받아도 소용없다. **kubelet이 그 이미지를 숨긴다**
+  (`crictl images`에 안 나온다).
+- Operator 2.8.1 이미지는 됐던 이유: 목록 없는 **단일 형식**이라 아키텍처 검사를 하지 않는다.
 
+그래서 **목록을 뺀 단일 형식으로 노드에 직접 넣는다** (kind의 `kind load docker-image`와 같은 원리).
+실행은 Rosetta가 맡는다.
+
+```bash
+./scripts/load-image.sh splunk/splunk:9.4.3     # 2.8.1 용
+./scripts/load-image.sh splunk/splunk:10.4.0    # 3.2.0 용 — 노드 2대, 약 3분
 ```
-$ docker exec fake-ec2-2 cat /proc/<pid>/cmdline
-/mnt/lima-rosetta/rosetta /manager --leader-elect --pprof
-```
 
-**amd64 바이너리를 Rosetta가 실행하고 있다** — VM → docker → 가짜 EC2 → containerd, 2단 중첩 안쪽에서.
-리소스: fake-ec2-2 컨테이너 전체 약 300MiB, CPU 10% 안팎(안정 후).
+스크립트가 하는 일: 호스트 docker에 amd64판 pull → `docker save` → `index.json` 제거 →
+각 `fake-ec2-*`의 containerd에 `ctr images import --platform linux/amd64` → `crictl images`로 확인.
 
-## Operator 매니페스트 받기 (2.8.1)
+**모든 워커에 넣어야 한다.** Splunk 파드가 어느 워커에 뜰지 미리 알 수 없다
+(실측: 9.4.3은 fake-ec2-1, 10.4.0은 fake-ec2-2에 떴다).
+노드를 새로 붙이면 그 노드에도 다시 넣는다.
 
-3MB 파일이라 저장소에는 넣지 않는다. 공식 릴리스에서 받아 **한 줄만 고친다.**
+> 리눅스 x86_64에서는 이 단계가 필요 없다. 노드가 원래 amd64라 kubelet이 알아서 받는다.
+
+## 경로 A — Operator 2.8.1 (Splunk 9.4.3)
 
 ```bash
 curl -sLO https://github.com/splunk/splunk-operator/releases/download/2.8.1/splunk-operator-cluster.yaml
-
-# 2025-03-18 이후 gcr.io 쪽 이미지를 더 이상 받을 수 없다
+# 2025-03-18 이후 gcr.io 쪽 이미지를 받을 수 없다 — 공식 파일은 아직 gcr.io 그대로
 sed -i.bak 's|gcr.io/kubebuilder/kube-rbac-proxy|registry.k8s.io/kubebuilder/kube-rbac-proxy|' \
   splunk-operator-cluster.yaml
-grep -n 'kube-rbac-proxy:' splunk-operator-cluster.yaml   # registry.k8s.io 로 바뀌었는지 확인
-
 kubectl apply -f splunk-operator-cluster.yaml --server-side
 ```
 
-- 공식 2.8.1 릴리스 파일은 **지금도 `gcr.io` 주소 그대로**다(2026-10 확인).
-  위 치환 한 줄이 원본과의 유일한 차이다.
-- `--server-side`가 필요하다. CRD가 커서 client-side apply는 어노테이션 크기 제한에 걸린다.
-- 최신 릴리스는 **3.2.0**(2026-09-24)이다. 3.x에서 이 문제가 남아 있는지는 확인하지 않았다.
+이어서 아래 [공통 — 워커에만 배치](#공통--워커에만-배치)와 [공통 — Standalone](#공통--standalone).
 
-포함된 리소스 (2.8.1 파일 실측):
-Namespace `splunk-operator`, CRD 8개, RBAC(ServiceAccount·Role·ClusterRole 등), ConfigMap 2, Service 2,
-**PVC 1** (`splunk-operator-app-download`, 10Gi, StorageClass 미지정 → 기본값 사용),
-Deployment `splunk-operator-controller-manager`.
+## 경로 B — Operator 3.2.0 (Splunk 10.4.0)
 
-- **예시 CR(Standalone 등)은 들어 있지 않다.** Splunk 인스턴스는 직접 CR을 써서 만든다 (아래).
-- PVC는 기본 StorageClass가 필요하다. MiniStack의 k3s에는 `local-path (default)`가 있다(확인함).
+```bash
+curl -sLO https://github.com/splunk/splunk-operator/releases/download/3.2.0/splunk-operator-cluster.yaml
+kubectl apply -f splunk-operator-cluster.yaml --server-side       # 패치 불필요
 
-## 워커에만 배치하기
+# Splunk General Terms 동의 — Operator Deployment의 환경변수다 (Standalone CR이 아니다)
+kubectl -n splunk-operator set env deploy/splunk-operator-controller-manager \
+  SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com
+```
 
-Operator Deployment에는 affinity·nodeSelector가 **없다**(실측). 그대로 두면 컨트롤플레인 노드에도
-배치될 수 있으므로, nginx와 같은 조건을 덧붙인다.
+### 동의를 빼먹으면
+
+**파드가 아예 만들어지지 않는다.** Splunk가 떴다 죽는 게 아니라 Operator가 CR 검증에서 거부한다.
+그래서 `kubectl get pod`에는 아무것도 안 보이고, 원인은 Standalone 상태에만 있다.
+
+```bash
+kubectl -n splunk-operator get standalone s1 -o jsonpath='{.status.phase}: {.status.message}'
+# Error: license not accepted, please adjust SPLUNK_GENERAL_TERMS to indicate you have
+#        accepted the current/latest version of the license. See README file for additional information
+```
+
+동의 값을 넣으면 Operator가 재시작되고, 같은 CR을 다시 처리해서 파드를 만든다(CR을 다시 만들 필요 없음).
+값은 Splunk 파드까지 전달된다.
+
+```
+SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com
+SPLUNK_START_ARGS=--accept-license
+```
+
+2.8.1 + Splunk 9.4.3에는 필요 없다. 9.4.3 이미지의 시작 스크립트(`/sbin/entrypoint.sh`)는
+`--accept-license`만 검사한다(이미지 안에서 확인).
+
+## 공통 — 워커에만 배치
+
+Operator Deployment에는 affinity가 **없다**(두 버전 모두). k3s 서버 노드에는 컨트롤플레인 테인트도 없어서,
+그대로 두면 운에 따라 서버 노드에 뜬다. nginx와 같은 조건을 덧붙인다.
 
 ```bash
 kubectl -n splunk-operator patch deploy splunk-operator-controller-manager --type merge -p \
 '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":
 {"nodeSelectorTerms":[{"matchExpressions":[{"key":"node-role.kubernetes.io/control-plane","operator":"DoesNotExist"}]}]}}}}}}}'
-kubectl -n splunk-operator get pods -o wide        # NODE 가 fake-ec2-* 인지 확인
+kubectl -n splunk-operator rollout status deploy/splunk-operator-controller-manager
 ```
 
-patch 후 파드가 새로 뜨면서, 이전 파드가 쥐고 있던 리더 리스가 만료되기까지 **약 35초** 동안
-`attempting to acquire leader lease`에서 멈춘 것처럼 보인다. 정상이다.
-k3s 서버 노드에는 컨트롤플레인 테인트가 없어서, patch 없이는 운에 따라 서버 노드에 뜰 수 있다.
+2.8.1은 patch 직후 약 35초 동안 로그가 `attempting to acquire leader lease`에서 멈춘 것처럼 보인다.
+이전 파드가 쥐고 있던 리더 리스가 만료되길 기다리는 것이라 정상이다.
 
-## Standalone 만들기 (미검증)
+## 공통 — Standalone
 
-CRD 확인 결과 `Standalone`은 `enterprise.splunk.com/v4`(저장 버전)이고 `spec.affinity`를 지원한다.
-
-```yaml
-apiVersion: enterprise.splunk.com/v4
-kind: Standalone
-metadata:
-  name: s1
-  namespace: splunk-operator
-spec:
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: node-role.kubernetes.io/control-plane
-            operator: DoesNotExist
-```
+[manifests/standalone.yaml](manifests/standalone.yaml) — 워커 고정 affinity가 들어 있다.
+이미지 버전은 Operator가 정한다.
 
 ```bash
-kubectl apply -f standalone.yaml
-kubectl -n splunk-operator get standalone,pods -o wide -w
+kubectl apply -f manifests/standalone.yaml
+kubectl -n splunk-operator get standalone -w       # PHASE: Pending → Ready
 ```
 
-`splunk/splunk` 이미지는 5GB가 넘어 첫 pull에 시간이 걸린다. 가짜 EC2마다 따로 받는다(노드별 캐시).
+PVC 두 개(`etc` 10Gi, `var` 100Gi)가 k3s 기본 `local-path`로 만들어진다. 실제 디스크는 쓰는 만큼만 쓴다.
 
-## 가장 큰 제약 — amd64 전용
+## 확인하는 법
 
-레지스트리에서 직접 확인(2026-10-13):
-
-```
-splunk/splunk:latest          → linux/amd64 만
-splunk/splunk:9.4.1           → linux/amd64 만
-splunk/splunk-operator:2.8.1  → linux/amd64 만
-rancher/k3s:latest            → amd64, arm64, arm     (클러스터 자체는 무관)
+```bash
+kubectl get nodes -o wide            # ROLES: control-plane,master = "EKS", <none> = 내 EC2
+kubectl get pod -A -o wide           # NODE 열 — Operator·Splunk가 fake-ec2-* 에 있어야 한다
+kubectl -n splunk-operator get standalone
 ```
 
-Apple Silicon 맥(arm64)에서는 **Rosetta 에뮬레이션이 필수**다.
-`nginx` 같은 멀티아치 이미지와 달리 선택의 여지가 없다.
-
-리눅스 호스트가 x86_64라면 거기서는 이 문제가 아예 없다.
-
-## Rosetta 상태
-
-colima는 이미 Rosetta가 켜져 있다. 추가 설정 불필요.
-
-```yaml
-# ~/.colima/default/colima.yaml
-vmType: vz        # Apple Virtualization.framework
-rosetta: true
-binfmt: true
-```
-
-VM 안에서 등록 확인됨: `/proc/sys/fs/binfmt_misc/rosetta` 존재.
-
-Rancher Desktop의 "VM Type: VZ + Enable Rosetta support"와 **같은 메커니즘**이다.
-(Rancher Desktop도 내부적으로 lima를 쓴다.) 따로 설치할 이유가 없다.
-
-## 중첩 깊이 — Operator로 확인됨, Splunk 본체는 미측정
+실측 (3.2.0):
 
 ```
-1단:  VM 커널 → containerd → 파드                              colima 내장 k3s, Rancher Desktop
-2단:  VM 커널 → docker → 노드 컨테이너 → containerd → 파드     kind, 에뮬레이터 k3s, **가짜 EC2**
+NAMESPACE        NAME                                                 READY  STATUS   NODE
+kube-system      coredns-ccb96694c-rhs4q                              1/1    Running  32fc79ffc7a7   ← 컨트롤플레인
+kube-system      local-path-provisioner-5cf85fd84d-hm82f              1/1    Running  32fc79ffc7a7
+splunk-operator  splunk-operator-controller-manager-8485865785-ffqmz  1/1    Running  fake-ec2-1     ← 내 EC2
+splunk-operator  splunk-s1-standalone-0                               1/1    Running  fake-ec2-2     ← 내 EC2
 ```
 
-Rosetta 인터프리터는 VM의 `/mnt/lima-rosetta/rosetta`에 있어서, 노드 컨테이너 안에서는
-그 경로가 보이지 않는다. 그래도 동작할 것으로 보는 근거는 등록 플래그다.
+> 실제 EKS에서는 `kubectl get nodes`에 컨트롤플레인이 **아예 안 나온다** (AWS가 숨겨서 관리).
+> 그래서 coredns 같은 기본 부품도 EC2 워커에 뜬다. 여기서는 k3s 서버가 노드로 보인다는 점만 다르다.
+
+Splunk가 실제로 응답하는지:
+
+```bash
+PW=$(kubectl -n splunk-operator get secret splunk-splunk-operator-secret -o jsonpath='{.data.password}' | base64 -d)
+kubectl -n splunk-operator exec splunk-s1-standalone-0 -- \
+  curl -sk -u admin:$PW "https://localhost:8089/services/server/info?output_mode=json" | grep -o '"version":"[^"]*"'
+kubectl -n splunk-operator port-forward pod/splunk-s1-standalone-0 8000:8000   # 브라우저 http://localhost:8000 (admin / 위 PW)
+```
+
+실측: 9.4.3·10.4.0 모두 `os_name: Linux`, `cpu_arch: x86_64`로 보고하고 웹 UI가 HTTP 200.
+
+## 맥에서 amd64가 도는 방식 — Rosetta
+
+```
+$ docker exec fake-ec2-2 cat /proc/<splunkd pid>/cmdline
+/mnt/lima-rosetta/rosetta /opt/splunk/bin/splunkd -p 8089 start
+```
+
+VM → docker → 가짜 EC2 컨테이너 → containerd, **두 겹 중첩 안쪽에서도 Rosetta가 실행한다.**
+가능한 이유는 colima가 Rosetta를 `F`(fix binary) 플래그로 등록하기 때문이다.
 
 ```
 $ colima ssh -- cat /proc/sys/fs/binfmt_misc/rosetta
 enabled
 interpreter /mnt/lima-rosetta/rosetta
-flags: OCF          ← F (fix binary)
+flags: OCF          ← F: 커널이 등록 시점에 인터프리터를 열어 두어 어느 컨테이너 안에서든 쓴다
 ```
 
-`F` 플래그가 있으면 커널이 **등록 시점에 인터프리터 파일을 열어 둔다.** 이후에는 어느 마운트
-네임스페이스(컨테이너 안의 컨테이너 포함)에서 실행해도 그 열린 파일을 쓴다.
-→ **Operator(amd64)가 2단 중첩에서 Rosetta로 실행되는 것을 확인했다** (위 결과).
+colima를 `--vm-type vz --vz-rosetta`로 시작해야 한다([00](00-setup-mac-linux.md)).
+Rancher Desktop의 "VZ + Enable Rosetta support"와 같은 메커니즘이다.
 
-다만 **Splunk 본체(`splunk/splunk`) 이미지로는 아직 확인하지 않았다.** Rosetta로도 일부 바이너리는 실패할 수 있다.
-안 되면 파드가 `exec format error` 등으로 죽는다. 그때는 QEMU binfmt를 등록하는 우회
-(`docker run --privileged --rm tonistiigi/binfmt --install amd64`)를 시도한다.
+## 리소스
 
-실제 EKS(amd64 EC2)나 x86_64 리눅스에서는 이 문제가 전혀 없다. Apple Silicon 맥에서만 생기는 제약이다.
+- colima 8GB에서 Operator + Standalone 1대 + 가짜 EC2 2대 + MiniStack이 여유 있게 돈다
+  (다른 클러스터(kind 등)는 꺼둘 것).
+- Splunk 10.4.0이 9.4.3보다 무겁다(약 2.1GB vs 1.2GB, 기동 직후 CPU 100% 안팎).
+- SearchHeadCluster는 파드 3개 이상이라 로컬에서는 무리. 실제 EKS에서 볼 것.
 
-## 리소스 요구
+## 정리
 
-- Standalone 1개: 대략 2 CPU / 4GB. 에뮬레이션 오버헤드 추가.
-- SearchHeadCluster: 파드 3개 이상. 로컬에서는 사실상 무리.
-- 호스트 RAM의 절반 정도를 colima에 할당하는 것이 상한선 (예: 18GB 맥 → 8~10GB).
-- **먼저 Standalone 하나로 확인하고, SHC는 실제 EKS에서 볼 것.**
+```bash
+kubectl -n splunk-operator delete standalone s1
+kubectl delete -f splunk-operator-cluster.yaml     # 네임스페이스·CRD·PVC까지 삭제된다 (실측)
+```

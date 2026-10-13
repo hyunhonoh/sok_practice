@@ -1,0 +1,15 @@
+# Splunk Standalone 1대. 워커(가짜 EC2)에만 배치한다.
+# 이미지 버전은 operator가 정한다 (2.8.1 → splunk/splunk:9.4.3, 3.2.0 → 10.4.0).
+apiVersion: enterprise.splunk.com/v4
+kind: Standalone
+metadata:
+  name: s1
+  namespace: splunk-operator
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: node-role.kubernetes.io/control-plane
+            operator: DoesNotExist

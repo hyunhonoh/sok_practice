@@ -39,6 +39,8 @@ colima ssh -- ls /proc/sys/fs/binfmt_misc/rosetta   # Rosetta 등록 확인
 - **컨테이너 IP(172.17.x.x)에 맥에서 직접 접근할 수 없다.** VM 안쪽 네트워크이기 때문.
   호스트에 publish된 포트(`localhost:4567`, `localhost:16443` 등)만 쓴다.
   colima가 publish된 포트를 맥으로 자동 포워딩한다.
+- **amd64 전용 이미지(Splunk)는 노드에 직접 load해야 한다.** arm64 노드의 kubelet이
+  amd64판만 있는 이미지를 받지 않기 때문 → `scripts/load-image.sh` ([04](04-splunk-operator.md))
 - colima 메모리는 호스트 RAM의 절반 정도가 상한선.
 - colima 설정의 `disk:` 값은 VM 생성 시점에 고정된다. 나중에 설정만 바꾸면
   `colima list`에는 바뀐 값이 보이지만 실제 디스크는 그대로다.
@@ -109,7 +111,7 @@ MiniStack만 쓴다면 4566으로 해도 된다(그때는 `AWS_ENDPOINT_URL`도 
 
 | 환경 | 검증 |
 |---|---|
-| 맥 Apple Silicon + colima 0.10.1 (vz, Rosetta), docker 29 | ✅ 01~03 전 과정 |
+| 맥 Apple Silicon + colima 0.10.1 (vz, Rosetta), docker 29 | ✅ 01~04 전 과정 (Operator 2.8.1·3.2.0, Splunk 9.4.3·10.4.0) |
 | 리눅스 Ubuntu 24.04 **aarch64**, docker 29.2.1, cgroup v2 | ✅ 클러스터 생성 → 가짜 EC2 조인 → 호스트에서 컨테이너 IP로 kubectl (k3s.yaml 사용. `update-kubeconfig` 경로는 맥에서만 확인) |
 | 리눅스 **x86_64** 실물 서버 | ❌ 미검증 (스크립트는 아키텍처를 자동 판별한다) |
 | SELinux 강제 배포판(RHEL/Fedora) | ❌ 미검증. `--privileged` 컨테이너에 추가 설정이 필요할 수 있다 |

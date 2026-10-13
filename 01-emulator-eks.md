@@ -10,12 +10,19 @@ aws eks create-cluster --name ms-test \
   --resources-vpc-config subnetIds=subnet-00000001,subnet-00000002
 aws eks wait cluster-active --name ms-test                 # 15초 안팎
 aws eks update-kubeconfig --name ms-test --alias ministack-eks
+# kubectl은 매번 'aws eks get-token'을 부른다. 위 환경변수가 없는 새 터미널에서도 되도록 kubeconfig에 넣어 둔다
+kubectl config set-credentials arn:aws:eks:ap-northeast-2:000000000000:cluster/ms-test \
+  --exec-env=AWS_ENDPOINT_URL=http://localhost:4567 --exec-env=AWS_ACCESS_KEY_ID=test \
+  --exec-env=AWS_SECRET_ACCESS_KEY=test --exec-env=AWS_DEFAULT_REGION=ap-northeast-2
 kubectl get nodes
 # 32fc79ffc7a7   Ready   control-plane,master   ← 노드 1개 = 컨트롤플레인
 ```
 
 MiniStack이 `ministack-eks-000000000000-ap-northeast-2-ms-test`라는 k3s 컨테이너를 띄운다.
 이것이 "EKS 컨트롤플레인"이다. 워커는 [02](02-fake-ec2-join.md)에서 붙인다.
+
+`kubectl`이 `The connection to the server 127.0.0.1:xxxxx was refused`를 내면 다른 클러스터(kind 등)
+컨텍스트를 보고 있는 것이다 → `kubectl config use-context ministack-eks`.
 
 ---
 

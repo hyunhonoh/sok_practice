@@ -3,7 +3,7 @@
 Splunk Operator for Kubernetes practice
 
 **EKS 관리형 컨트롤플레인 + 직접 붙인 EC2 워커** 구조를 로컬(맥·리눅스)에서 재현하고,
-그 위에 nginx → Splunk Operator 순서로 배포해보는 실습.
+그 위에 nginx → Splunk Operator → Splunk Standalone 순서로 배포해보는 실습.
 
 AWS 계정·비용 없이 docker 하나로 돈다.
 
@@ -15,7 +15,7 @@ AWS 계정·비용 없이 docker 하나로 돈다.
 | 01 | [EKS 컨트롤플레인 — 에뮬레이터 (floci · MiniStack)](01-emulator-eks.md) | ✅ 실측 |
 | 02 | [가짜 EC2를 워커로 조인](02-fake-ec2-join.md) | ✅ 실측 |
 | 03 | [nginx 배포 — 워커에만](03-deploy-nginx.md) | ✅ 실측 |
-| 04 | [Splunk Operator 배포](04-splunk-operator.md) | ✅ Operator 실측 (amd64 → Rosetta) · ⬜ Standalone 미검증 |
+| 04 | [Splunk Operator + Standalone](04-splunk-operator.md) | ✅ 2.8.1(Splunk 9.4.3)·3.2.0(10.4.0) 둘 다 실측 |
 | 05 | [실제 EKS + 자체 EC2 (참고)](05-real-eks-self-managed.md) | ⬜ 미착수 초안 |
 
 ## 구조
@@ -48,6 +48,9 @@ aws eks create-cluster --name ms-test --role-arn arn:aws:iam::000000000000:role/
   --resources-vpc-config subnetIds=subnet-00000001,subnet-00000002
 aws eks wait cluster-active --name ms-test
 aws eks update-kubeconfig --name ms-test --alias ministack-eks
+kubectl config set-credentials arn:aws:eks:ap-northeast-2:000000000000:cluster/ms-test \
+  --exec-env=AWS_ENDPOINT_URL=http://localhost:4567 --exec-env=AWS_ACCESS_KEY_ID=test \
+  --exec-env=AWS_SECRET_ACCESS_KEY=test --exec-env=AWS_DEFAULT_REGION=ap-northeast-2   # 새 터미널에서도 되게
 
 # 3. 가짜 EC2 워커
 ./scripts/fake-ec2-join.sh fake-ec2-1            # rancher/k3s 이미지 (수 초)
@@ -56,12 +59,27 @@ kubectl get nodes
 
 # 4. nginx (워커에만)
 kubectl apply -f manifests/web-test.yaml           # Namespace 포함, 다시 실행해도 안전
-kubectl -n web-test get pods -o wide
+kubectl -n web-test get pods -o wide               # NODE 열이 fake-ec2-* 인지
+
+# 5. Splunk Operator 3.2.0 + Standalone (2.8.1은 04 참고)
+./scripts/load-image.sh splunk/splunk:10.4.0       # 맥만 — amd64 이미지를 노드에 넣기 (약 3분)
+curl -sLO https://github.com/splunk/splunk-operator/releases/download/3.2.0/splunk-operator-cluster.yaml
+kubectl apply -f splunk-operator-cluster.yaml --server-side
+kubectl -n splunk-operator set env deploy/splunk-operator-controller-manager \
+  SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com            # 3.x 필수
+kubectl -n splunk-operator patch deploy splunk-operator-controller-manager --type merge -p \
+'{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":
+{"nodeSelectorTerms":[{"matchExpressions":[{"key":"node-role.kubernetes.io/control-plane","operator":"DoesNotExist"}]}]}}}}}}}'
+kubectl apply -f manifests/standalone.yaml
+kubectl -n splunk-operator get standalone -w                         # Ready까지 2~3분
+kubectl get pod -A -o wide                                           # Operator·Splunk가 fake-ec2-* 에
 ```
 
 ## 전체 정리
 
 ```bash
+kubectl -n splunk-operator delete standalone s1
+kubectl delete -f splunk-operator-cluster.yaml
 kubectl delete -f manifests/web-test.yaml
 docker rm -fv $(docker ps -aq --filter name=fake-ec2-)        # -v: 익명 볼륨까지
 aws eks delete-cluster --name ms-test                         # k3s 서버 컨테이너도 사라진다
@@ -91,10 +109,12 @@ IAM 쪽은 이 실습으로 연습되지 않는다. ([02](02-fake-ec2-join.md), 
 01-emulator-eks.md             floci · MiniStack 실측 비교
 02-fake-ec2-join.md            조인 원리, 실제 EKS 부트스트랩과 비교, 막혔던 것들
 03-deploy-nginx.md             워커 전용 배포와 결과
-04-splunk-operator.md          Operator 받기·패치·적용, amd64/Rosetta 제약
+04-splunk-operator.md          Operator 2.8.1/3.2.0, Splunk General Terms, 맥 이미지 load, Rosetta
 05-real-eks-self-managed.md    실제 AWS에서 할 때 (미검증 초안)
 scripts/fake-ec2-join.sh       가짜 EC2 조인 스크립트
+scripts/load-image.sh          [맥] amd64 전용 이미지를 노드 containerd에 넣기
 manifests/web-test.yaml        nginx 매니페스트 (실제 EKS에서도 그대로)
+manifests/standalone.yaml      Splunk Standalone (워커 고정)
 ```
 
 ## 2.8.1 operator url 변경
