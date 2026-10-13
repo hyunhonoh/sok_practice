@@ -1,0 +1,4 @@
+# 공식 릴리스에서 받아 패치한다 (04-splunk-operator.md)
+splunk-operator-cluster.yaml
+*.bak
+.DS_Store
