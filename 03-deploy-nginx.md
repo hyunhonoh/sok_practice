@@ -8,7 +8,7 @@ EKS 관리형 컨트롤플레인 + 자체 EC2 워커와 스케줄링 관점에�
 [01](01-emulator-eks.md)로 클러스터를 만들고 [02](02-fake-ec2-join.md)로 가짜 EC2를 1대 이상 붙인 상태.
 
 ```bash
-aws eks update-kubeconfig --name ms-test --alias ministack-eks   # MiniStack은 이걸로 인증된다
+kubectl config use-context ministack-eks      # 01에서 등록한 컨텍스트 (update-kubeconfig를 다시 하면 exec-env가 지워진다)
 kubectl get nodes
 # 32fc79ffc7a7   Ready   control-plane,master
 # fake-ec2-1     Ready   <none>

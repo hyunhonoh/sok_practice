@@ -21,6 +21,7 @@ softwareupdate --install-rosetta --agree-to-license   # --vz-rosetta 에 필요 
 # vz + Rosetta: 나중에 amd64 전용 이미지(Splunk)를 돌리기 위해
 # kubernetes=false: colima 내장 k3s는 쓰지 않는다 (에뮬레이터가 k3s를 띄운다)
 colima start --cpu 6 --memory 8 --vm-type vz --vz-rosetta --kubernetes=false
+# 이미 colima VM이 있으면 vm-type·Rosetta 설정은 바뀌지 않는다 → colima delete 후 다시, 또는 -p 새프로필
 
 # inotify 한도 — 기본 128이면 k3s가 여러 개 뜰 때 즉사한다 (아래 트러블슈팅 참고)
 colima ssh -- bash -c 'printf "fs.inotify.max_user_instances = 1024\nfs.inotify.max_user_watches = 1048576\n" \
@@ -30,9 +31,9 @@ colima ssh -- bash -c 'printf "fs.inotify.max_user_instances = 1024\nfs.inotify.
 확인:
 
 ```bash
-colima status                       # macOS Virtualization.Framework, arch aarch64
-docker info --format '{{.Architecture}}'
-colima ssh -- ls /proc/sys/fs/binfmt_misc/rosetta   # Rosetta 등록 확인
+colima status                       # "macOS Virtualization.Framework", "arch: aarch64" 가 보여야 한다
+docker info --format '{{.Architecture}}'            # aarch64
+colima ssh -- ls /proc/sys/fs/binfmt_misc/rosetta   # 파일이 있으면 Rosetta 등록됨
 ```
 
 맥 특이사항:
@@ -48,6 +49,7 @@ colima ssh -- ls /proc/sys/fs/binfmt_misc/rosetta   # Rosetta 등록 확인
 ## 리눅스
 
 ```bash
+# 준비물: git, curl (없으면 sudo apt-get install -y git curl)
 # Docker Engine (배포판 패키지 또는 공식 스크립트)
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER      # 적용하려면 로그아웃 후 다시 로그인 (또는 맨 끝에 newgrp docker)
@@ -78,8 +80,9 @@ unzip -q awscliv2.zip && sudo ./aws/install && rm -rf aws awscliv2.zip
 - **호스트에서 컨테이너 IP로 바로 접근된다.** k3s API를 `https://172.17.0.x:6443`로 직접 쓸 수 있다
   (publish된 포트 `localhost:16443`도 된다).
 - x86_64 리눅스라면 Splunk(amd64 전용)가 **에뮬레이션 없이** 네이티브로 돈다.
-- arm64 리눅스라면 amd64 이미지를 위해 QEMU binfmt 등록이 필요하다
-  (`docker run --privileged --rm tonistiigi/binfmt --install amd64`). **미검증.**
+- arm64 리눅스라면 Splunk(amd64)를 위해 QEMU binfmt 등록
+  (`docker run --privileged --rm tonistiigi/binfmt --install amd64`)과 맥과 같은 이미지 load
+  (`scripts/load-image.sh`, [04](04-splunk-operator.md))가 둘 다 필요할 것이다. **미검증.**
 
 ## 공통 — 저장소 받기
 

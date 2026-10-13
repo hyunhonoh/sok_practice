@@ -30,6 +30,9 @@ fake-ec2-3     Ready    <none>                 v1.31.4+k3s1   ← scripts/fake-e
 ./scripts/fake-ec2-join.sh fake-ec2-1            # rancher/k3s 이미지 (6초)
 ./scripts/fake-ec2-join.sh fake-ec2-2 ubuntu     # 일반 Ubuntu에 설치 (apt 포함 1~2분)
 CLUSTER=ms-test ./scripts/fake-ec2-join.sh ...   # 클러스터가 여러 개일 때는 이름 지정 (아니면 거부)
+for n in fake-ec2-1 fake-ec2-2; do                    # 등록 전엔 wait 가 NotFound 로 실패하므로 반복
+  until kubectl wait --for=condition=Ready node/$n --timeout=10s >/dev/null 2>&1; do sleep 5; done
+done
 kubectl get nodes
 
 docker rm -fv fake-ec2-1                         # "EC2 종료" (-v: 익명 볼륨까지 삭제)

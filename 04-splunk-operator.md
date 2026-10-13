@@ -21,9 +21,9 @@ Splunk Standalone 1대를 **워커에만** 올린다. 2.8.1과 3.2.0 두 버전�
 
 3.0.0도 같은 구조다(`splunk/splunk:10.0.0`, `SPLUNK_GENERAL_TERMS` 비어 있음 — 매니페스트로 확인, 실행은 안 함).
 
-## 맥에서만 — Splunk 이미지 load (먼저 할 것)
+## arm64 호스트(맥)에서만 — Splunk 이미지 load (먼저 할 것)
 
-`splunk/splunk`는 **amd64판만 있다.** arm64 가짜 EC2에서 그냥 띄우면:
+`splunk/splunk`는 **amd64판만 있다.** arm64 가짜 EC2(맥, arm64 리눅스)에서 그냥 띄우면:
 
 ```
 Failed to pull image "splunk/splunk:9.4.3": ... no match for platform in manifest: not found
@@ -40,17 +40,27 @@ Failed to pull image "splunk/splunk:9.4.3": ... no match for platform in manifes
 
 ```bash
 ./scripts/load-image.sh splunk/splunk:9.4.3     # 2.8.1 용
-./scripts/load-image.sh splunk/splunk:10.4.0    # 3.2.0 용 — 노드 2대, 약 3분
+./scripts/load-image.sh splunk/splunk:10.4.0    # 3.2.0 용
+# 실측: 호스트 pull 포함 약 3분 / 이미 받아둔 이미지면 노드 2대에 1분 안팎
 ```
 
-스크립트가 하는 일: 호스트 docker에 amd64판 pull → `docker save` → `index.json` 제거 →
-각 `fake-ec2-*`의 containerd에 `ctr images import --platform linux/amd64` → `crictl images`로 확인.
+스크립트가 하는 일: 노드 준비 확인 → 호스트 docker에 amd64판 pull → `docker save --platform linux/amd64`
+→ `index.json` 제거(한 번만) → 각 `fake-ec2-*`의 containerd에 `ctr images import --platform linux/amd64`
+→ `crictl images`로 kubelet이 보는지 확인. x86_64 호스트에서는 아무것도 하지 않고 끝난다.
+
+워커가 `Ready`가 된 뒤에 실행한다. Ubuntu 방식 노드는 기동 후 1~2분 동안 k3s를 설치하는 중이라,
+그 사이에 돌리면 "아직 준비되지 않았다"로 멈춘다.
 
 **모든 워커에 넣어야 한다.** Splunk 파드가 어느 워커에 뜰지 미리 알 수 없다
 (실측: 9.4.3은 fake-ec2-1, 10.4.0은 fake-ec2-2에 떴다).
 노드를 새로 붙이면 그 노드에도 다시 넣는다.
 
-> 리눅스 x86_64에서는 이 단계가 필요 없다. 노드가 원래 amd64라 kubelet이 알아서 받는다.
+> 리눅스 x86_64에서는 이 단계가 필요 없을 것이다. 노드가 원래 amd64라 kubelet이 알아서 받는다 (미검증).
+> arm64 리눅스는 맥과 같은 문제가 생기고, Rosetta 대신 QEMU binfmt 등록([00](00-setup-mac-linux.md))과
+> 이 load가 함께 필요할 것이다 (미검증).
+
+두 경로 중 하나만 고른다. **같은 클러스터에서 버전을 바꾸려면 먼저 아래 [정리](#정리)를 실행한다**
+(파일 이름이 같고, 이전 CRD·Operator·Standalone이 남는다). Standalone의 Splunk 버전은 Operator가 정한다.
 
 ## 경로 A — Operator 2.8.1 (Splunk 9.4.3)
 
@@ -60,6 +70,7 @@ curl -sLO https://github.com/splunk/splunk-operator/releases/download/2.8.1/splu
 sed -i.bak 's|gcr.io/kubebuilder/kube-rbac-proxy|registry.k8s.io/kubebuilder/kube-rbac-proxy|' \
   splunk-operator-cluster.yaml
 kubectl apply -f splunk-operator-cluster.yaml --server-side
+kubectl wait --for=condition=Established crd/standalones.enterprise.splunk.com
 ```
 
 이어서 아래 [공통 — 워커에만 배치](#공통--워커에만-배치)와 [공통 — Standalone](#공통--standalone).
@@ -69,11 +80,18 @@ kubectl apply -f splunk-operator-cluster.yaml --server-side
 ```bash
 curl -sLO https://github.com/splunk/splunk-operator/releases/download/3.2.0/splunk-operator-cluster.yaml
 kubectl apply -f splunk-operator-cluster.yaml --server-side       # 패치 불필요
+kubectl wait --for=condition=Established crd/standalones.enterprise.splunk.com
 
 # Splunk General Terms 동의 — Operator Deployment의 환경변수다 (Standalone CR이 아니다)
 kubectl -n splunk-operator set env deploy/splunk-operator-controller-manager \
   SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com
 ```
+
+> **이 값은 [Splunk General Terms](https://www.splunk.com/en_us/legal/splunk-general-terms.html)에
+> 동의한다는 뜻이다.** Operator README도 읽고 동의할 때만 넣으라고 한다. 별도 라이선스를 넣지 않으면
+> Splunk는 체험(trial) 라이선스로 동작한다.
+
+이어서 아래 공통 단계.
 
 ### 동의를 빼먹으면
 
@@ -119,8 +137,19 @@ kubectl -n splunk-operator rollout status deploy/splunk-operator-controller-mana
 
 ```bash
 kubectl apply -f manifests/standalone.yaml
-kubectl -n splunk-operator get standalone -w       # PHASE: Pending → Ready
+kubectl -n splunk-operator wait standalone/s1 --for=jsonpath='{.status.phase}'=Ready --timeout=15m
 ```
+
+맥 실측 2~3분(이미지를 미리 load한 경우). 리눅스 x86_64는 이때 이미지(수 GB)를 받으므로 더 걸린다(미검증).
+진행 상황은 `kubectl -n splunk-operator describe pod splunk-s1-standalone-0`의 Events에서 본다.
+
+끝나지 않을 때:
+
+| 증상 | 원인 |
+|---|---|
+| `standalone` PHASE `Error`, 파드 없음, 메시지 `license not accepted` | 3.x에서 `SPLUNK_GENERAL_TERMS` 누락 |
+| 파드 `ImagePullBackOff`, 이벤트 `no match for platform in manifest` | arm64 호스트에서 `load-image.sh` 누락 (또는 새로 붙인 노드에 안 넣음) |
+| 파드 `ContainerCreating`이 오래감 | 이미지를 받는 중 (리눅스) — Events에서 `Pulling` 확인 |
 
 PVC 두 개(`etc` 10Gi, `var` 100Gi)가 k3s 기본 `local-path`로 만들어진다. 실제 디스크는 쓰는 만큼만 쓴다.
 
@@ -150,7 +179,7 @@ Splunk가 실제로 응답하는지:
 ```bash
 PW=$(kubectl -n splunk-operator get secret splunk-splunk-operator-secret -o jsonpath='{.data.password}' | base64 -d)
 kubectl -n splunk-operator exec splunk-s1-standalone-0 -- \
-  curl -sk -u admin:$PW "https://localhost:8089/services/server/info?output_mode=json" | grep -o '"version":"[^"]*"'
+  curl -sk -u "admin:$PW" "https://localhost:8089/services/server/info?output_mode=json" | grep -o '"version":"[^"]*"'
 kubectl -n splunk-operator port-forward pod/splunk-s1-standalone-0 8000:8000   # 브라우저 http://localhost:8000 (admin / 위 PW)
 ```
 

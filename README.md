@@ -55,6 +55,9 @@ kubectl config set-credentials arn:aws:eks:ap-northeast-2:000000000000:cluster/m
 # 3. 가짜 EC2 워커
 ./scripts/fake-ec2-join.sh fake-ec2-1            # rancher/k3s 이미지 (수 초)
 ./scripts/fake-ec2-join.sh fake-ec2-2 ubuntu     # 일반 Ubuntu + k3s 설치 (1~2분)
+for n in fake-ec2-1 fake-ec2-2; do                    # 등록 전엔 wait 가 NotFound 로 실패하므로 반복
+  until kubectl wait --for=condition=Ready node/$n --timeout=10s >/dev/null 2>&1; do sleep 5; done
+done
 kubectl get nodes
 
 # 4. nginx (워커에만)
@@ -62,33 +65,48 @@ kubectl apply -f manifests/web-test.yaml           # Namespace 포함, 다시 �
 kubectl -n web-test get pods -o wide               # NODE 열이 fake-ec2-* 인지
 
 # 5. Splunk Operator 3.2.0 + Standalone (2.8.1은 04 참고)
-./scripts/load-image.sh splunk/splunk:10.4.0       # 맥만 — amd64 이미지를 노드에 넣기 (약 3분)
+./scripts/load-image.sh splunk/splunk:10.4.0       # arm64 호스트(맥)만 — amd64 이미지를 노드에 넣기 (pull 포함 약 3분)
 curl -sLO https://github.com/splunk/splunk-operator/releases/download/3.2.0/splunk-operator-cluster.yaml
 kubectl apply -f splunk-operator-cluster.yaml --server-side
+kubectl wait --for=condition=Established crd/standalones.enterprise.splunk.com
+# 3.x 필수. 이 값은 Splunk General Terms 에 동의한다는 뜻이다 — 읽고 동의할 때만 넣는다
+#   https://www.splunk.com/en_us/legal/splunk-general-terms.html
 kubectl -n splunk-operator set env deploy/splunk-operator-controller-manager \
-  SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com            # 3.x 필수
+  SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com
 kubectl -n splunk-operator patch deploy splunk-operator-controller-manager --type merge -p \
 '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":
 {"nodeSelectorTerms":[{"matchExpressions":[{"key":"node-role.kubernetes.io/control-plane","operator":"DoesNotExist"}]}]}}}}}}}'
+kubectl -n splunk-operator rollout status deploy/splunk-operator-controller-manager
 kubectl apply -f manifests/standalone.yaml
-kubectl -n splunk-operator get standalone -w                         # Ready까지 2~3분
+kubectl -n splunk-operator wait standalone/s1 --for=jsonpath='{.status.phase}'=Ready --timeout=15m
+#   맥 실측 2~3분. 리눅스 x86_64는 이때 이미지(수 GB)를 받으므로 더 걸린다 (미검증)
+#   안 끝나면: kubectl -n splunk-operator get standalone s1 -o jsonpath='{.status.phase}: {.status.message}'
+#     Error + "license not accepted" → SPLUNK_GENERAL_TERMS 누락
+#     파드가 ImagePullBackOff / "no match for platform" → arm64 호스트에서 load-image.sh 를 빠뜨림
 kubectl get pod -A -o wide                                           # Operator·Splunk가 fake-ec2-* 에
 ```
 
 ## 전체 정리
 
+`aws` 명령은 위 `export AWS_*` 환경변수가 있는 터미널에서 실행한다.
+
 ```bash
 kubectl -n splunk-operator delete standalone s1
-kubectl delete -f splunk-operator-cluster.yaml
+kubectl delete -f splunk-operator-cluster.yaml && rm -f splunk-operator-cluster.yaml*
 kubectl delete -f manifests/web-test.yaml
-docker rm -fv $(docker ps -aq --filter name=fake-ec2-)        # -v: 익명 볼륨까지
-aws eks delete-cluster --name ms-test                         # k3s 서버 컨테이너도 사라진다
+docker ps -aq --filter name=fake-ec2- | xargs -r docker rm -fv   # -v: 익명 볼륨까지 (bash·zsh 공통)
+aws eks delete-cluster --name ms-test
+aws eks wait cluster-deleted --name ms-test                   # k3s 서버 컨테이너도 사라진다
+docker ps -a --filter name=ministack-eks                      # 비어 있어야 한다
 docker rm -f ministack
 kubectl config delete-context ministack-eks
 kubectl config delete-cluster arn:aws:eks:ap-northeast-2:000000000000:cluster/ms-test
 kubectl config delete-user    arn:aws:eks:ap-northeast-2:000000000000:cluster/ms-test
 
 colima stop          # 맥: VM 정지 (지우려면 colima delete — 이미지·볼륨 전부 삭제)
+
+# 선택: 받아둔 이미지 (수 GB)
+docker rmi splunk/splunk:10.4.0 splunk/splunk:9.4.3 rancher/k3s:v1.31.4-k3s1 ubuntu:24.04 ministackorg/ministack:latest
 ```
 
 ## 왜 "에뮬레이터 + 가짜 EC2"인가
@@ -112,7 +130,7 @@ IAM 쪽은 이 실습으로 연습되지 않는다. ([02](02-fake-ec2-join.md), 
 04-splunk-operator.md          Operator 2.8.1/3.2.0, Splunk General Terms, 맥 이미지 load, Rosetta
 05-real-eks-self-managed.md    실제 AWS에서 할 때 (미검증 초안)
 scripts/fake-ec2-join.sh       가짜 EC2 조인 스크립트
-scripts/load-image.sh          [맥] amd64 전용 이미지를 노드 containerd에 넣기
+scripts/load-image.sh          [arm64 호스트] amd64 전용 이미지를 노드 containerd에 넣기
 manifests/web-test.yaml        nginx 매니페스트 (실제 EKS에서도 그대로)
 manifests/standalone.yaml      Splunk Standalone (워커 고정)
 ```
