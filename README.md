@@ -15,7 +15,7 @@ AWS 계정·비용 없이 docker 하나로 돈다.
 | 01 | [EKS 컨트롤플레인 — 에뮬레이터 (floci · MiniStack)](01-emulator-eks.md) | ✅ 실측 |
 | 02 | [가짜 EC2를 워커로 조인](02-fake-ec2-join.md) | ✅ 실측 |
 | 03 | [nginx 배포 — 워커에만](03-deploy-nginx.md) | ✅ 실측 |
-| 04 | [Splunk Operator 배포](04-splunk-operator.md) | ⬜ **최종 목표**, 준비 절차만 |
+| 04 | [Splunk Operator 배포](04-splunk-operator.md) | ✅ Operator 실측 (amd64 → Rosetta) · ⬜ Standalone 미검증 |
 | 05 | [실제 EKS + 자체 EC2 (참고)](05-real-eks-self-managed.md) | ⬜ 미착수 초안 |
 
 ## 구조

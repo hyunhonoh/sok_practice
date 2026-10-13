@@ -1,7 +1,7 @@
 # 04. Splunk Operator 배포 (최종 목표)
 
-nginx 배포([03](03-deploy-nginx.md))가 끝난 뒤의 최종 단계. 여기 적힌 것은 **조사 결과와 준비 절차**이고,
-Operator를 이 구성에서 실제로 띄워서 확인한 기록은 아직 없다.
+nginx 배포([03](03-deploy-nginx.md))가 끝난 뒤의 최종 단계.
+**Operator 배포는 실측 완료(2026-10-14, 맥).** Standalone(Splunk 인스턴스) 생성은 아직이다.
 
 ## 흐름에서의 위치
 
@@ -10,7 +10,26 @@ Operator를 이 구성에서 실제로 띄워서 확인한 기록은 아직 없�
 ```
 
 nginx와 같은 경로(워커 노드에 배치)로 Operator를 올리는 것이 최종 목표다.
-**아직 실측하지 않았다.** 아래는 준비 절차와 예상되는 제약이다.
+
+## 결과 (실측)
+
+```
+NAME                                                READY   STATUS    RESTARTS   NODE
+splunk-operator-controller-manager-d57b6d5bd-nzznm  2/2     Running   0          fake-ec2-2
+
+PVC splunk-operator-app-download   Bound   10Gi   local-path
+CRD 8개 등록, 리더 리스 획득, 컨트롤러 9개 "Starting workers" (standalone 포함)
+```
+
+가짜 EC2는 arm64인데 Operator 이미지는 amd64 전용이다. 노드 안에서 실제 프로세스를 보면:
+
+```
+$ docker exec fake-ec2-2 cat /proc/<pid>/cmdline
+/mnt/lima-rosetta/rosetta /manager --leader-elect --pprof
+```
+
+**amd64 바이너리를 Rosetta가 실행하고 있다** — VM → docker → 가짜 EC2 → containerd, 2단 중첩 안쪽에서.
+리소스: fake-ec2-2 컨테이너 전체 약 300MiB, CPU 10% 안팎(안정 후).
 
 ## Operator 매니페스트 받기 (2.8.1)
 
@@ -52,7 +71,9 @@ kubectl -n splunk-operator patch deploy splunk-operator-controller-manager --typ
 kubectl -n splunk-operator get pods -o wide        # NODE 가 fake-ec2-* 인지 확인
 ```
 
-patch 문법은 같은 구조의 Deployment에 서버 dry-run으로 확인했다. Operator 자체에는 아직 적용해보지 않았다.
+patch 후 파드가 새로 뜨면서, 이전 파드가 쥐고 있던 리더 리스가 만료되기까지 **약 35초** 동안
+`attempting to acquire leader lease`에서 멈춘 것처럼 보인다. 정상이다.
+k3s 서버 노드에는 컨트롤플레인 테인트가 없어서, patch 없이는 운에 따라 서버 노드에 뜰 수 있다.
 
 ## Standalone 만들기 (미검증)
 
@@ -113,7 +134,7 @@ VM 안에서 등록 확인됨: `/proc/sys/fs/binfmt_misc/rosetta` 존재.
 Rancher Desktop의 "VM Type: VZ + Enable Rosetta support"와 **같은 메커니즘**이다.
 (Rancher Desktop도 내부적으로 lima를 쓴다.) 따로 설치할 이유가 없다.
 
-## 중첩 깊이 — 근거상 동작 예상, Splunk로는 미측정
+## 중첩 깊이 — Operator로 확인됨, Splunk 본체는 미측정
 
 ```
 1단:  VM 커널 → containerd → 파드                              colima 내장 k3s, Rancher Desktop
@@ -131,10 +152,10 @@ flags: OCF          ← F (fix binary)
 ```
 
 `F` 플래그가 있으면 커널이 **등록 시점에 인터프리터 파일을 열어 둔다.** 이후에는 어느 마운트
-네임스페이스(컨테이너 안의 컨테이너 포함)에서 실행해도 그 열린 파일을 쓴다. 따라서 2단에서도
-amd64 바이너리가 Rosetta로 실행될 것으로 예상한다.
+네임스페이스(컨테이너 안의 컨테이너 포함)에서 실행해도 그 열린 파일을 쓴다.
+→ **Operator(amd64)가 2단 중첩에서 Rosetta로 실행되는 것을 확인했다** (위 결과).
 
-다만 **Splunk 이미지로 실제 확인한 것은 아니다.** Rosetta로도 일부 바이너리는 실패할 수 있다.
+다만 **Splunk 본체(`splunk/splunk`) 이미지로는 아직 확인하지 않았다.** Rosetta로도 일부 바이너리는 실패할 수 있다.
 안 되면 파드가 `exec format error` 등으로 죽는다. 그때는 QEMU binfmt를 등록하는 우회
 (`docker run --privileged --rm tonistiigi/binfmt --install amd64`)를 시도한다.
 
