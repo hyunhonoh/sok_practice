@@ -92,9 +92,9 @@ kubectl get pod -A -o wide                                           # Operator�
 `aws` 명령은 위 `export AWS_*` 환경변수가 있는 터미널에서 실행한다.
 
 ```bash
-kubectl -n splunk-operator delete standalone s1
-kubectl delete -f splunk-operator-cluster.yaml && rm -f splunk-operator-cluster.yaml*
-kubectl delete -f manifests/web-test.yaml
+kubectl -n splunk-operator delete standalone s1 --ignore-not-found
+kubectl delete -f splunk-operator-cluster.yaml --ignore-not-found && rm -f splunk-operator-cluster.yaml*
+kubectl delete -f manifests/web-test.yaml --ignore-not-found
 docker ps -aq --filter name=fake-ec2- | xargs -r docker rm -fv   # -v: 익명 볼륨까지 (bash·zsh 공통)
 aws eks delete-cluster --name ms-test
 aws eks wait cluster-deleted --name ms-test                   # k3s 서버 컨테이너도 사라진다
