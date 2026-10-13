@@ -17,6 +17,7 @@ AWS 계정·비용 없이 docker 하나로 돈다.
 | 03 | [nginx 배포 — 워커에만](03-deploy-nginx.md) | ✅ 실측 |
 | 04 | [Splunk Operator + Standalone](04-splunk-operator.md) | ✅ 2.8.1(Splunk 9.4.3)·3.2.0(10.4.0) 둘 다 실측 |
 | 05 | [실제 EKS + 자체 EC2 (참고)](05-real-eks-self-managed.md) | ⬜ 미착수 초안 |
+| 06 | [리눅스 실측 체크리스트](06-linux-verify.md) | ⬜ 리눅스는 조인까지만 확인 — 다음 할 일 |
 
 ## 구조
 
@@ -129,6 +130,8 @@ IAM 쪽은 이 실습으로 연습되지 않는다. ([02](02-fake-ec2-join.md), 
 03-deploy-nginx.md             워커 전용 배포와 결과
 04-splunk-operator.md          Operator 2.8.1/3.2.0, Splunk General Terms, 맥 이미지 load, Rosetta
 05-real-eks-self-managed.md    실제 AWS에서 할 때 (미검증 초안)
+06-linux-verify.md             리눅스 실측 순서·기대값·결과 기록 표
+AGENTS.md / CLAUDE.md          에이전트용 작업 규칙과 현재 할 일
 scripts/fake-ec2-join.sh       가짜 EC2 조인 스크립트
 scripts/load-image.sh          [arm64 호스트] amd64 전용 이미지를 노드 containerd에 넣기
 manifests/web-test.yaml        nginx 매니페스트 (실제 EKS에서도 그대로)
